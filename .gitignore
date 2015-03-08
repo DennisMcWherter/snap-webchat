@@ -3,3 +3,4 @@ cabal.sandbox.config
 .cabal-sandbox
 dist
 log
+site_key.txt
