@@ -24,6 +24,7 @@ import           Heist
 import qualified Heist.Interpreted as I
 ------------------------------------------------------------------------------
 import           Application
+import           Snap.Snaplet.Chat
 
 
 ------------------------------------------------------------------------------
@@ -79,7 +80,7 @@ app = makeSnaplet "app" "An snaplet example application." Nothing $ do
            initCookieSessionManager "site_key.txt" "sess" (Just 3600)
     d <- nestSnaplet "db" db $ pgsInit
     a <- nestSnaplet "auth" auth $ initPostgresAuth sess d
+    c <- nestSnaplet "chat" chat $ initChat auth
     addRoutes routes
     addAuthSplices h auth
-    return $ App h s d a
-
+    return $ App h s d a c

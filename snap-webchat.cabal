@@ -35,7 +35,10 @@ Executable snap-webchat
     aeson                     >= 0.7.0.4 && < 0.8,
     snaplet-postgresql-simple >= 0.6     && < 0.7,
     postgresql-simple         >= 0.4.8.0 && < 0.5,
-    opaleye                   >= 0.3.1   && < 0.4
+    opaleye                   >= 0.3.1   && < 0.4,
+    transformers              >= 0.3     && < 0.4,
+    websockets                >= 0.9.3.0 && < 0.10,
+    websockets-snap           >= 0.9.1.0 && < 0.10
 
   if flag(development)
     build-depends:
