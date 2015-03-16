@@ -38,7 +38,8 @@ Executable snap-webchat
     opaleye                   >= 0.3.1   && < 0.4,
     transformers              >= 0.3     && < 0.4,
     websockets                >= 0.9.3.0 && < 0.10,
-    websockets-snap           >= 0.9.1.0 && < 0.10
+    websockets-snap           >= 0.9.1.0 && < 0.10,
+    async                     >= 2.0.2   && < 2.1
 
   if flag(development)
     build-depends:
