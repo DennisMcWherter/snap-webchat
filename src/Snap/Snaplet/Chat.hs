@@ -1,6 +1,4 @@
 {-# LANGUAGE OverloadedStrings #-}
-{-# LANGUAGE DoAndIfThenElse #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-|
 Module      : Chat
 Description : Chat module for Snap Framework
@@ -25,6 +23,7 @@ import Control.Monad.State.Class
 import Data.ByteString
 import Data.IORef
 import qualified Data.ByteString.Lazy as LBS
+import Data.Text.Encoding
 import Network.WebSockets
 import Network.WebSockets.Snap
 import Snap.Core
@@ -37,8 +36,8 @@ data Chat = Chat { bcastChan :: BroadcastChannel -- ^ Broadcast channel
                  }
 
 -- | Websocket server for real-time chat communication
-chatServer :: Handler b Chat ()
-chatServer = do
+chatServer :: LBS.ByteString -> Handler b Chat ()
+chatServer user = do
   bchan <- gets bcastChan
   cntRef <- gets userCount
   liftIO $ incCount cntRef
@@ -58,7 +57,7 @@ chatServer = do
           result <- waitEither reader writer
           case result of
            Left msg -> sendDataMessage conn $ Text msg
-           Right (Text msg) -> writeChan chan msg
+           Right (Text msg) -> writeChan chan (LBS.append "<" $ LBS.append user $ LBS.append "> " msg)
            Right _ -> Prelude.putStrLn "Received some binary data from client. Ignoring."
           -- NOTE: This is ugly.. It continuously creates/tearsdown threads
           -- Determine who won the race and which async we need to restart
@@ -89,22 +88,26 @@ pageHandler = writeText "Send user to chat page."
 routes :: SnapletLens b (AuthManager b) -> [(ByteString, Handler b Chat ())]
 routes auth = (fmap $ enforceLogin auth)
          [ ("/", pageHandler)
-         , ("/chat", chatServer)]
-
+         , ("/chat", handleChatClient)]
+  where handleChatClient = do
+          user <- withTop auth $ do
+            cur <- currentUser
+            return $ maybe Nothing (Just . LBS.pack . unpack . encodeUtf8 . userLogin) cur
+          maybe (return ()) chatServer user
+               
 -- | Initialize snaplet by providing a snaplet containing an active
 -- database connection.
 initChat :: SnapletLens b (AuthManager b) -- ^ Auth manager
          -> SnapletInit b Chat
 initChat auth = makeSnaplet "chat" "web chat backend" Nothing $ do
     addRoutes $ routes auth
-    --chan <- return $! newChan
     cnt <- liftIO $ newIORef 0
     chan <- liftIO $ newChan
     return $! Chat chan cnt
 
 enforceLogin :: SnapletLens b (AuthManager b)
-             -> (ByteString, Handler b Chat ())
-             -> (ByteString, Handler b Chat ())
+             -> (ByteString, Handler b v ())
+             -> (ByteString, Handler b v ())
 enforceLogin auth (uri, handler) = (uri, requireUser auth badLogin handler)
   where badLogin = do
           modifyResponse $ setResponseCode 401
