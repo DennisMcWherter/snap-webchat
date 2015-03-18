@@ -1,4 +1,7 @@
+{-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
 {-|
 Module      : Chat
 Description : Chat module for Snap Framework
@@ -12,7 +15,6 @@ Chat Snaplet used in example tutorial.
 module Snap.Snaplet.Chat(
   Chat(..)
   ,initChat
-  ,chatServer
   ) where
 
 import Control.Concurrent.Async
@@ -21,23 +23,48 @@ import Control.Exception (catch)
 import Control.Monad.IO.Class
 import Control.Monad.State.Class
 import Data.ByteString
-import Data.IORef
+import qualified Data.ByteString.Lazy.Char8 as C
 import qualified Data.ByteString.Lazy as LBS
+import Data.IORef
+import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import Data.Text.Encoding
+import Data.Text.Read
 import Network.WebSockets
 import Network.WebSockets.Snap
+import Opaleye
 import Snap.Core
 import Snap.Snaplet
 import Snap.Snaplet.Auth
 
+type UserIdentity = (LBS.ByteString, Int)
 type BroadcastChannel = (Chan LBS.ByteString)
 data Chat = Chat { bcastChan :: BroadcastChannel -- ^ Broadcast channel
                  , userCount :: IORef Int -- ^ Current user count
                  }
+data ChatMessage' a b c d = ChatMessage' { msgId :: a -- ^ Unique identifier for message
+                                         , msgText :: b -- ^ Message text
+                                         , msgUserId :: c -- ^ User id of poster
+                                         , msgDate :: d -- ^ Date message was posted
+                                         } deriving (Show)
+type ChatMessage = ChatMessage' Int String Int String
+type ChatColumnW = ChatMessage' (Maybe (Column PGInt4)) (Column PGText) (Column PGInt4) (Maybe (Column PGTimestamptz))
+type ChatColumnR = ChatMessage' (Column PGInt4) (Column PGText) (Column PGInt4) (Column PGTimestamptz)
+
+-- Generate profunctor
+$(makeAdaptorAndInstance "pChatMessage" ''ChatMessage')
+
+-- | Table definition for chat messages
+chatMessageTable :: Table ChatColumnW ChatColumnR
+chatMessageTable = Table "chat"
+                   (pChatMessage ChatMessage' { msgId = optional "id"
+                                              , msgText = required "message"
+                                              , msgUserId = required "user_id"
+                                              , msgDate = optional "date"
+                                              })
 
 -- | Websocket server for real-time chat communication
-chatServer :: LBS.ByteString -> Handler b Chat ()
-chatServer user = do
+chatServer :: UserIdentity -> Handler b Chat ()
+chatServer (user, uid) = do
   bchan <- gets bcastChan
   cntRef <- gets userCount
   liftIO $ incCount cntRef
@@ -57,7 +84,7 @@ chatServer user = do
           result <- waitEither reader writer
           case result of
            Left msg -> sendDataMessage conn $ Text msg
-           Right (Text msg) -> writeChan chan (LBS.append "<" $ LBS.append user $ LBS.append "> " msg)
+           Right (Text msg) -> logMessage msg >> writeChan chan (LBS.append "<" $ LBS.append user $ LBS.append "> " msg)
            Right _ -> Prelude.putStrLn "Received some binary data from client. Ignoring."
           -- NOTE: This is ugly.. It continuously creates/tearsdown threads
           -- Determine who won the race and which async we need to restart
@@ -79,21 +106,45 @@ chatServer user = do
         updateCount cntRef fn = atomicModifyIORef cntRef fn >>= Prelude.putStrLn . ("User count: " ++) . show
         decCount cntRef = updateCount cntRef (\x -> let y = x - 1 in (y, y))
         incCount cntRef = updateCount cntRef (\x -> let y = x + 1 in (y, y))
+        -- Database helper
+        logMessage msg =
+          Prelude.putStrLn $ arrangeInsertSql chatMessageTable $
+            ChatMessage' { msgId = Nothing
+                         , msgText = (pgString . C.unpack) msg
+                         , msgUserId = pgInt4 uid
+                         , msgDate = Nothing
+                         }
 
 -- | Handler responsible for displaying main chat page
 pageHandler :: Handler b Chat ()
 pageHandler = writeText "Send user to chat page."
 
+-- | Handler to retrieve the last 50 chat messages
+getLastFifty :: Handler b Chat ()
+getLastFifty = do
+  liftIO $ Prelude.putStrLn $ getMessages ((limit 50 . orderBy (desc msgDate) . queryTable) chatMessageTable)
+  where getMessages :: Query ChatColumnR -> String
+        getMessages = showSqlForPostgres
+
 -- | Routes protected by login
 routes :: SnapletLens b (AuthManager b) -> [(ByteString, Handler b Chat ())]
 routes auth = (fmap $ enforceLogin auth)
          [ ("/", pageHandler)
-         , ("/chat", handleChatClient)]
+         , ("/chat", handleChatClient)
+         , ("/last", getLastFifty)]
   where handleChatClient = do
           user <- withTop auth $ do
             cur <- currentUser
-            return $ maybe Nothing (Just . LBS.pack . unpack . encodeUtf8 . userLogin) cur
+            return $ case cur of
+                      Just u ->
+                        case userId u of
+                         Just uid -> case (decimal . unUid) uid of
+                           Right idVal -> Just (textToLBS $ userLogin u, fst idVal)
+                           Left _ -> Nothing
+                         Nothing -> Nothing
+                      Nothing -> Nothing
           maybe (return ()) chatServer user
+        textToLBS = LBS.pack . unpack . encodeUtf8
                
 -- | Initialize snaplet by providing a snaplet containing an active
 -- database connection.
