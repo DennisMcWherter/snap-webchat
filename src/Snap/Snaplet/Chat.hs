@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE Arrows #-}
 {-|
 Module      : Chat
 Description : Chat module for Snap Framework
@@ -17,16 +18,18 @@ module Snap.Snaplet.Chat(
   ,initChat
   ) where
 
+import Control.Arrow hiding (loop)
 import Control.Concurrent.Async
 import Control.Concurrent.Chan
 import Control.Exception (catch)
 import Control.Lens
 import Control.Monad.Reader
 import Control.Monad.State.Class
-import Data.ByteString
+import Data.ByteString hiding (putStrLn, foldl)
 import qualified Data.ByteString.Lazy.Char8 as C
 import qualified Data.ByteString.Lazy as LBS
 import Data.IORef
+import Data.Profunctor.Product (p2)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Data.Text as T
 import Data.Text.Encoding
@@ -57,13 +60,11 @@ data ChatMessage' a b c d = ChatMessage' { msgId :: a -- ^ Unique identifier for
                                          , msgUserId :: c -- ^ User id of poster
                                          , msgDate :: d -- ^ Date message was posted
                                          }
-type ChatMessage = ChatMessage' Int String Int LocalTime
+type ChatMessage = ChatMessage' Int String String LocalTime
+type ChatMessageColumn = ChatMessage' (Column PGInt4) (Column PGText) (Column PGText) (Column PGTimestamp)
 type ChatColumnW = ChatMessage' (Maybe (Column PGInt4)) (Column PGText) (Column PGInt4) (Maybe (Column PGTimestamp))
 type ChatColumnR = ChatMessage' (Column PGInt4) (Column PGText) (Column PGInt4) (Column PGTimestamp)
-
--- Nice display format
-instance (Show b, Show c, Show d) => Show (ChatMessage' a b c d) where
-  show (ChatMessage' _ txt user date) = "[" ++ show date ++ "] <" ++ show user ++ "> " ++ show txt
+type UserColumn = ((Column PGInt4, Column PGText))
 
 -- Generate profunctor
 $(makeAdaptorAndInstance "pChatMessage" ''ChatMessage')
@@ -76,6 +77,12 @@ chatMessageTable = Table "chat"
                                               , msgUserId = required "user_id"
                                               , msgDate = optional "date"
                                               })
+
+-- | Table definition for snap user for our user
+-- | NOTE: We only extract fields we care about
+userTable :: Table UserColumn
+                   UserColumn
+userTable = Table "snap_auth_user" (p2 (required "uid", required "login"))
 
 -- | Websocket server for real-time chat communication
 chatServer :: UserIdentity -> Handler b Chat ()
@@ -104,7 +111,7 @@ chatServer (user, uid) = do
              written <- runReaderT (withPG $ liftPG $ storeMessage msg) dbSnaplet
              Prelude.putStrLn $ if written > 0 then "stored message." else "did not store message."
              writeChan chan (LBS.append "<" $ LBS.append user $ LBS.append "> " msg)
-           Right _ -> Prelude.putStrLn "Received some binary data from client. Ignoring."
+           Right _ -> putStrLn "Received some binary data from client. Ignoring."
           -- NOTE: This is ugly.. It continuously creates/tearsdown threads
           -- Determine who won the race and which async we need to restart
           let loop = serve conn dbSnaplet chan
@@ -140,12 +147,23 @@ pageHandler = writeText "Send user to chat page."
 -- | Handler to retrieve the last 50 chat messages
 getLastFifty :: Handler b Postgres ()
 getLastFifty = do
-  msgs <- liftPG $ getMessages ((limit 50 . orderBy (desc msgDate) . queryTable) chatMessageTable)
+  msgQuery <- return $ ((limit 50 . orderBy (asc msgDate) . queryTable) chatMessageTable)
+  userQuery <- return $ queryTable userTable
+  msgs <- liftPG $ getMessages $ joinMessagesAndUsers msgQuery userQuery
   writeText $ if Prelude.length msgs > 0
-              then T.append (T.append "<pre>" ((T.pack . Prelude.foldl ((++) . (++"\n"))  "" . fmap show) msgs)) "</pre>"
+              then T.append (T.append "<pre>" ((T.pack . foldl ((++) . (++"\n"))  "" . fmap formatChatMessage) msgs)) "</pre>"
               else "No messages to display"
-  where getMessages :: Query ChatColumnR -> PGS.Connection -> IO [ChatMessage]
+  where getMessages :: Query ChatMessageColumn -> PGS.Connection -> IO [ChatMessage]
         getMessages = flip runQuery
+        joinMessagesAndUsers :: Query ChatColumnR -> Query UserColumn -> Query ChatMessageColumn
+        joinMessagesAndUsers msgQuery usrQuery = proc () -> do
+          (ChatMessage' mid txt uid date) <- msgQuery -< ()
+          (userid, login) <- usrQuery -< ()
+          restrict -< uid .== userid
+          returnA -< ChatMessage' mid txt login date
+        formatChatMessage :: ChatMessage -> String
+        formatChatMessage (ChatMessage' _ txt uid date) =
+          "[" ++ show date ++ "] &lt;" ++ uid ++ "&gt; " ++ txt
 
 -- | Routes protected by login
 routes :: SnapletLens b (AuthManager b) -> [(ByteString, Handler b Chat ())]
