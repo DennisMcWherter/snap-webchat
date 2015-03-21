@@ -42,6 +42,7 @@ import Opaleye
 import Snap.Core
 import Snap.Snaplet
 import Snap.Snaplet.Auth
+import Snap.Snaplet.Heist
 import Snap.Snaplet.PostgresqlSimple (Postgres(..), liftPG, withPG)
 
 type UserIdentity = (LBS.ByteString, Int)
@@ -110,7 +111,7 @@ chatServer (user, uid) = do
            Right (Text msg) -> do
              written <- runReaderT (withPG $ liftPG $ storeMessage msg) dbSnaplet
              Prelude.putStrLn $ if written > 0 then "stored message." else "did not store message."
-             writeChan chan (LBS.append "<" $ LBS.append user $ LBS.append "> " msg)
+             writeChan chan (LBS.append "&lt;" $ LBS.append user $ LBS.append "&gt; " msg)
            Right _ -> putStrLn "Received some binary data from client. Ignoring."
           -- NOTE: This is ugly.. It continuously creates/tearsdown threads
           -- Determine who won the race and which async we need to restart
@@ -141,8 +142,8 @@ chatServer (user, uid) = do
                          }
 
 -- | Handler responsible for displaying main chat page
-pageHandler :: Handler b Chat ()
-pageHandler = writeText "Send user to chat page."
+pageHandler :: (HasHeist b) => Handler b Chat ()
+pageHandler = render "chat_view"
 
 -- | Handler to retrieve the last 50 chat messages
 getLastFifty :: Handler b Postgres ()
@@ -166,7 +167,7 @@ getLastFifty = do
           "[" ++ show date ++ "] &lt;" ++ uid ++ "&gt; " ++ txt
 
 -- | Routes protected by login
-routes :: SnapletLens b (AuthManager b) -> [(ByteString, Handler b Chat ())]
+routes :: (HasHeist b) => SnapletLens b (AuthManager b) -> [(ByteString, Handler b Chat ())]
 routes auth = (fmap $ enforceLogin auth)
          [ ("/", pageHandler)
          , ("/chat", handleChatClient)
@@ -187,7 +188,8 @@ routes auth = (fmap $ enforceLogin auth)
                
 -- | Initialize snaplet by providing a snaplet containing an active
 -- database connection.
-initChat :: SnapletLens b (AuthManager b) -- ^ Auth manager
+initChat :: (HasHeist b)
+         => SnapletLens b (AuthManager b) -- ^ Auth manager
          -> Snaplet Postgres -- ^ Postgres DB
          -> SnapletInit b Chat
 initChat auth db' = makeSnaplet "chat" "web chat backend" Nothing $ do
